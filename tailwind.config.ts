@@ -12,7 +12,8 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", ...fontFamily.sans]
+        sans: ["Rajdhani", "Inter", ...fontFamily.sans],
+        hud: ["Rajdhani", "Inter", ...fontFamily.sans]
       },
       colors: {
         border: "hsl(var(--border))",
@@ -48,6 +49,14 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))"
         }
+      },
+      boxShadow: {
+        hud: "0 0 0.5rem -0.1rem hsl(var(--glow-green) / 0.6), 0 0 1.25rem -0.2rem hsl(var(--glow-green) / 0.35)",
+        amber: "0 0 0.5rem -0.1rem hsl(var(--glow-amber) / 0.6), 0 0 1.25rem -0.2rem hsl(var(--glow-amber) / 0.35)"
+      },
+      backgroundImage: {
+        "jet-grid": "repeating-linear-gradient(90deg, hsl(215 18% 24%) 0px, hsl(215 18% 24%) 1px, transparent 1px, transparent 40px), repeating-linear-gradient(0deg, hsl(215 18% 24%) 0px, hsl(215 18% 24%) 1px, transparent 1px, transparent 40px)",
+        "jet-radar": "radial-gradient(circle at 50% 50%, hsl(155 30% 18%) 0%, transparent 70%)"
       },
       borderRadius: {
         lg: "var(--radius)",

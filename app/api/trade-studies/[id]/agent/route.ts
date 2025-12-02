@@ -34,7 +34,8 @@ export async function POST(request: Request, { params }: { params: { id: string 
       tradeStudyId: params.id,
       goal: agentGoal,
       extraContext,
-      publishTargets
+      publishTargets,
+      userId: session.user.id
     };
 
     // 5. Run the agent

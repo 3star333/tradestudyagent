@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getTradeStudyById, updateTradeStudy, type TradeStudyRecord } from "../studies";
 import { exportToDocs, exportToSheets, exportToSlides, uploadToDrive } from "../google";
+import { attachFileToTradeStudy } from "../studies";
 import { analyzeTradeStudy, type TradeStudyAnalysis } from "../openai";
 
 /**
@@ -70,6 +71,7 @@ export async function analyzeWithLLMTool(
 // ==================== Publish to Google ====================
 export const publishToGoogleSchema = z.object({
   tradeStudyId: z.string().describe("The ID of the trade study to publish"),
+  userId: z.string().optional().describe("User ID for per-user Google exports"),
   targets: z
     .object({
       doc: z.boolean().optional().describe("Export to Google Docs"),
@@ -84,12 +86,14 @@ export type PublishResult = {
   target: string;
   status: "ok" | "error" | "skipped";
   message: string;
+  fileId?: string;
+  attachmentId?: string;
 };
 
 export async function publishToGoogleTool(
   input: z.infer<typeof publishToGoogleSchema>
 ): Promise<PublishResult[]> {
-  const { tradeStudyId, targets } = input;
+  const { tradeStudyId, targets, userId } = input;
   const results: PublishResult[] = [];
 
   const study = await getTradeStudyById(tradeStudyId);
@@ -97,32 +101,83 @@ export async function publishToGoogleTool(
     return [{ target: "all", status: "error", message: "Trade study not found" }];
   }
 
-  const payload = { tradeStudyId, payload: study.data };
+  const payload = { tradeStudyId, payload: study.data, userId };
 
   if (targets.doc) {
     const result = await exportToDocs(payload);
+    let attachmentId: string | undefined;
+    const fileId = (result as any).fileId as string | undefined;
+    if (result.status === "ok" && fileId) {
+      try {
+        const attachment = await attachFileToTradeStudy({
+          tradeStudyId,
+          fileId,
+          type: "doc",
+          title: "Analysis Document"
+        });
+        attachmentId = attachment?.id;
+      } catch (err) {
+        console.error("[publishToGoogleTool] attach doc failed", err);
+      }
+    }
     results.push({
       target: "Google Docs",
       status: result.status as "ok" | "error" | "skipped",
-      message: result.message || "Export completed"
+      message: result.message || "Export completed",
+      fileId,
+      attachmentId
     });
   }
 
   if (targets.sheet) {
     const result = await exportToSheets(payload);
+    let attachmentId: string | undefined;
+    const fileId = (result as any).fileId as string | undefined;
+    if (result.status === "ok" && fileId) {
+      try {
+        const attachment = await attachFileToTradeStudy({
+          tradeStudyId,
+          fileId,
+          type: "sheet",
+          title: "Scoring Sheet"
+        });
+        attachmentId = attachment?.id;
+      } catch (err) {
+        console.error("[publishToGoogleTool] attach sheet failed", err);
+      }
+    }
     results.push({
       target: "Google Sheets",
       status: result.status as "ok" | "error" | "skipped",
-      message: result.message || "Export completed"
+      message: result.message || "Export completed",
+      fileId,
+      attachmentId
     });
   }
 
   if (targets.slides) {
     const result = await exportToSlides(payload);
+    let attachmentId: string | undefined;
+    const fileId = (result as any).fileId as string | undefined;
+    if (result.status === "ok" && fileId) {
+      try {
+        const attachment = await attachFileToTradeStudy({
+          tradeStudyId,
+          fileId,
+          type: "slide",
+          title: "Presentation"
+        });
+        attachmentId = attachment?.id;
+      } catch (err) {
+        console.error("[publishToGoogleTool] attach slides failed", err);
+      }
+    }
     results.push({
       target: "Google Slides",
       status: result.status as "ok" | "error" | "skipped",
-      message: result.message || "Export completed"
+      message: result.message || "Export completed",
+      fileId,
+      attachmentId
     });
   }
 

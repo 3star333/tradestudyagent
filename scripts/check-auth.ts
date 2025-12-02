@@ -6,30 +6,25 @@ async function checkAuthData() {
   // Check users
   const users = await db.user.findMany({
     include: {
-      Account: true,
-      Session: true,
+      accounts: true,
+      sessions: true,
     },
   });
 
   console.log(`📊 Found ${users.length} user(s):\n`);
   
   for (const user of users) {
-    const userWithRelations = user as typeof user & {
-      Account: Array<{ provider: string; providerAccountId: string }>;
-      Session: Array<{ id: string }>;
-    };
-    
     console.log(`User: ${user.email}`);
     console.log(`  - ID: ${user.id}`);
     console.log(`  - Name: ${user.name}`);
-    console.log(`  - Accounts: ${userWithRelations.Account.length}`);
-    console.log(`  - Sessions: ${userWithRelations.Session.length}`);
+    console.log(`  - Accounts: ${user.accounts.length}`);
+    console.log(`  - Sessions: ${user.sessions.length}`);
     
-    if (userWithRelations.Account.length === 0) {
+    if (user.accounts.length === 0) {
       console.log(`  ⚠️  WARNING: User has no linked OAuth accounts!`);
     }
     
-    userWithRelations.Account.forEach((account) => {
+    user.accounts.forEach((account) => {
       console.log(`  - OAuth Provider: ${account.provider}`);
       console.log(`    Provider Account ID: ${account.providerAccountId}`);
     });

@@ -1,4 +1,4 @@
-import type { Prisma, TradeStudyStatus } from "@prisma/client";
+import type { Prisma, TradeStudyStatus, TradeStudyAttachmentType } from "@prisma/client";
 
 import { db } from "./db";
 
@@ -93,8 +93,8 @@ export async function getTradeStudyById(id: string): Promise<TradeStudyRecord | 
 export async function attachFileToTradeStudy(params: {
   tradeStudyId: string;
   fileId: string;
-  type: TradeStudyAttachment["type"];
-  title?: string;
+  type: TradeStudyAttachmentType;
+  title?: string | null;
 }) {
   const { tradeStudyId, fileId, type, title } = params;
 
@@ -105,7 +105,7 @@ export async function attachFileToTradeStudy(params: {
       id: `att-${Math.random().toString(36).slice(2, 8)}`,
       fileId,
       type,
-      title,
+      title: title ?? null,
       createdAt: new Date(),
       tradeStudyId
     } as TradeStudyAttachment;
@@ -123,7 +123,7 @@ export async function attachFileToTradeStudy(params: {
       data: {
         fileId,
         type,
-        title,
+        title: title ?? null,
         tradeStudy: { connect: { id: tradeStudyId } }
       }
     });
@@ -136,7 +136,7 @@ export async function attachFileToTradeStudy(params: {
 export async function createTradeStudy(params: {
   ownerId: string;
   title: string;
-  summary?: string;
+  summary?: string | null;
   status?: TradeStudyStatus;
   data?: Record<string, unknown>;
 }) {
@@ -159,7 +159,7 @@ export async function createTradeStudy(params: {
   }
 
   return db.tradeStudy.create({
-    data: { title, summary, status, data: data as any, owner: { connect: { id: ownerId } } },
+    data: { title, summary: summary ?? null, status, data: data as any, owner: { connect: { id: ownerId } } },
     include: { attachments: true }
   });
 }
@@ -167,7 +167,7 @@ export async function createTradeStudy(params: {
 export async function updateTradeStudy(params: {
   tradeStudyId: string;
   title?: string;
-  summary?: string;
+  summary?: string | null;
   status?: TradeStudyStatus;
   data?: Record<string, unknown>;
 }) {
@@ -193,7 +193,7 @@ export async function updateTradeStudy(params: {
     where: { id: tradeStudyId },
     data: {
       title,
-      summary,
+      summary: summary ?? undefined,
       status,
       data: data as any
     },

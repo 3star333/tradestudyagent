@@ -2,38 +2,171 @@
 // Wire up with googleapis package and service account credentials before using in production.
 
 import type { Account } from "@prisma/client";
-
 import { db } from "./db";
+import { getDriveClient, getDocsClient, getSheetsClient } from "./googleClient";
+import OpenAI from "openai";
 
 interface ExportPayload {
   tradeStudyId?: string;
   payload?: unknown;
 }
 
-export async function exportToDocs({ tradeStudyId, payload }: ExportPayload) {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-    return { status: "skipped", reason: "GOOGLE_SERVICE_ACCOUNT_KEY missing" };
+export async function exportToDocs({ tradeStudyId, payload }: ExportPayload & { userId?: string; folderId?: string }) {
+  if (!payload || !tradeStudyId) return { status: "error", artifact: "doc", message: "Missing payload or tradeStudyId" };
+  if (!payload || typeof payload !== "object") return { status: "error", artifact: "doc", message: "Invalid payload" };
+  const userId = (payload as any).userId || (arguments[0] as any).userId;
+  try {
+    if (!userId) return { status: "skipped", artifact: "doc", message: "No userId provided" };
+    const docs = await getDocsClient(userId);
+    const drive = await getDriveClient(userId);
+  const title = (payload as any).title || (payload as any).topic || `Trade Study ${tradeStudyId}`;
+    // Create empty doc via Drive
+    const fileMeta: any = await drive.files.create({
+      requestBody: { name: title, mimeType: "application/vnd.google-apps.document", parents: (arguments[0] as any).folderId ? [(arguments[0] as any).folderId] : undefined }
+    });
+    const fileId = fileMeta.data.id;
+    // Insert content using Docs batchUpdate
+  const sections = (payload as any).criteria ? await buildDocSectionsWithNarrative(payload as any) : [];
+    const requests = sections.flatMap((s: any, idx: number) => {
+      const prefix = idx === 0 ? "" : "\n\n";
+      return [
+        {
+          insertText: {
+            location: { index: 1 },
+            text: `${prefix}${s.heading}\n${s.body}`
+          }
+        }
+      ];
+    });
+    if (requests.length) {
+      await docs.documents.batchUpdate({ documentId: fileId!, requestBody: { requests } });
+    }
+  console.log(`[exportToDocs] Created doc ${fileId} for study ${tradeStudyId}`);
+  return { status: "ok", artifact: "doc", fileId, message: "Doc created" };
+  } catch (e) {
+  console.error("[exportToDocs] error", e);
+  return { status: "error", artifact: "doc", message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+async function buildDocSectionsWithNarrative(payload: any) {
+  const { topic, criteria = [], alternatives = [], scored = [], winner } = payload;
+  const baseSections = [
+    { heading: `Trade Study: ${topic}`, body: `Winner: ${winner?.name || winner || "TBD"}` },
+    { heading: "Criteria", body: criteria.map((c: any) => `${c.name} (w=${c.weight}): ${c.description}`).join("\n") },
+    { heading: "Alternatives", body: alternatives.map((a: any) => `${a.name}: ${a.rationale}`).join("\n") },
+    {
+      heading: "Scores",
+      body: scored
+        .map((s: any) => `${s.name}: total=${s.weightedTotal} | ${Object.entries(s.scores).map(([k, v]) => `${k}=${v}`).join(", ")}`)
+        .join("\n")
+    }
+  ];
+
+  // Attempt narrative enrichment if OpenAI key available
+  if (process.env.OPENAI_API_KEY) {
+    try {
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const narrativePrompt = `Generate a concise executive summary (5-8 sentences) for the following trade study.
+Topic: ${topic}
+Criteria: ${criteria.map((c: any) => `${c.name}(w=${c.weight})`).join(", ")}
+Alternatives: ${alternatives.map((a: any) => a.name).join(", ")}
+Winner: ${winner?.name || winner || "TBD"}
+Scores: ${scored.map((s: any) => `${s.name}=${s.weightedTotal}`).join(", ")}
+Return ONLY plain text.`;
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You draft clear executive summaries for technical decision records." },
+          { role: "user", content: narrativePrompt }
+        ],
+        temperature: 0.4
+      });
+      const narrative = completion.choices[0]?.message?.content?.trim();
+      if (narrative) {
+        baseSections.splice(1, 0, { heading: "Executive Summary", body: narrative });
+      }
+    } catch (e) {
+      console.warn("[buildDocSectionsWithNarrative] narrative generation failed", e);
+    }
   }
 
-  // TODO: Use googleapis Docs API to create or update a document in the provided Drive folder.
-  return {
-    status: "ok",
-    message: `Stubbed export for trade study ${tradeStudyId ?? "(unknown)"}`,
-    payload
-  };
+  return baseSections;
 }
 
-export async function exportToSheets({ tradeStudyId }: ExportPayload) {
-  return { status: "ok", message: `Stubbed Sheets export for ${tradeStudyId ?? "unknown"}` };
+export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }: ExportPayload & { userId?: string; matrix?: any; folderId?: string }) {
+  try {
+  if (!userId) return { status: "skipped", artifact: "sheet", message: "No userId provided" };
+    const sheets = await getSheetsClient(userId);
+  const drive = await getDriveClient(userId);
+    const title = `Trade Study Scoring ${tradeStudyId}`;
+    const fileMeta: any = await drive.files.create({
+      requestBody: { name: title, mimeType: "application/vnd.google-apps.spreadsheet", parents: (arguments[0] as any).folderId ? [(arguments[0] as any).folderId] : undefined }
+    });
+    const fileId = fileMeta.data.id;
+  const criteria: any[] = matrix?.criteria || [];
+  const scored: any[] = matrix?.scored || [];
+  const recommendations: string[] = matrix?.recommendations || [];
+    // Build header row
+    const header = ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
+    const rows = scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: fileId!,
+      range: "Sheet1!A1",
+      valueInputOption: "RAW",
+      requestBody: { values: [header, ...rows] }
+    });
+    // Sheet2: Criteria Weights & Recommendations
+    const criteriaSheetValues = [
+      ["Criterion", "Weight", "Description"],
+      ...criteria.map((c) => [c.name, c.weight, c.description])
+    ];
+    const recValues = recommendations.length
+      ? [["Recommendations"], ...recommendations.map((r) => [r])]
+      : [["Recommendations"], ["(none)"]];
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: fileId!,
+      range: "Sheet2!A1",
+      valueInputOption: "RAW",
+      requestBody: { values: [...criteriaSheetValues, [""], ...recValues] }
+    });
+    console.log(`[exportToSheets] Created sheet ${fileId} for study ${tradeStudyId}`);
+    return { status: "ok", artifact: "sheet", fileId, message: "Sheet created" };
+  } catch (e) {
+    console.error("[exportToSheets] error", e);
+    return { status: "error", artifact: "sheet", message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
-export async function exportToSlides({ tradeStudyId }: ExportPayload) {
-  return { status: "ok", message: `Stubbed Slides export for ${tradeStudyId ?? "unknown"}` };
+export async function exportToSlides({ tradeStudyId, userId, folderId }: ExportPayload & { userId?: string; folderId?: string }) {
+  try {
+    if (!userId) return { status: "skipped", artifact: "slide", message: "No userId provided" };
+    const drive = await getDriveClient(userId);
+    const title = `Trade Study Slides ${tradeStudyId}`;
+    const fileMeta: any = await drive.files.create({
+      requestBody: { name: title, mimeType: "application/vnd.google-apps.presentation", parents: folderId ? [folderId] : undefined }
+    });
+    const fileId = fileMeta.data.id;
+    console.log(`[exportToSlides] Created slides ${fileId} for study ${tradeStudyId}`);
+    return { status: "ok", artifact: "slide", fileId, message: "Slides created" };
+  } catch (e) {
+    console.error("[exportToSlides] error", e);
+    return { status: "error", artifact: "slide", message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
-export async function uploadToDrive({ tradeStudyId }: ExportPayload) {
-  const folder = process.env.GOOGLE_DRIVE_FOLDER_ID || "unset";
-  return { status: "ok", message: `Stubbed Drive upload for ${tradeStudyId ?? "unknown"} to folder ${folder}` };
+export async function uploadToDrive({ tradeStudyId, userId, folderId }: ExportPayload & { userId?: string; folderId?: string }) {
+  try {
+    if (!userId) return { status: "skipped", artifact: "drive", message: "No userId provided" };
+    if (!folderId) return { status: "skipped", artifact: "drive", message: "No folderId provided" };
+    // Simple validation call
+    const drive = await getDriveClient(userId);
+    await drive.files.get({ fileId: folderId, fields: "id" });
+    return { status: "ok", artifact: "drive", message: `Validated folder ${folderId}` };
+  } catch (e) {
+    console.error("[uploadToDrive] error", e);
+    return { status: "error", artifact: "drive", message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export function getGoogleAuthUrl(callbackUrl = "/dashboard") {
@@ -66,22 +199,26 @@ export async function getLinkedGoogleAccount(userId?: string) {
 export async function listDriveFiles(userId?: string): Promise<DriveListing> {
   const account = await getLinkedGoogleAccount(userId);
   const requiresLink = !account;
-
-  // TODO: Replace with live Drive API call using the oauth tokens in the Account table.
-  return {
-    requiresLink,
-    account: account
-      ? {
-          id: account.id,
-          scope: account.scope,
-          refresh_token: account.refresh_token,
-          expires_at: account.expires_at
-        }
-      : null,
-    files: [
-      { id: "1-demo-doc", name: "Trade study doc (stub)", mimeType: "application/vnd.google-apps.document" },
-      { id: "1-demo-sheet", name: "Option scoring sheet (stub)", mimeType: "application/vnd.google-apps.spreadsheet" },
-      { id: "1-demo-slide", name: "Review slides (stub)", mimeType: "application/vnd.google-apps.presentation" }
-    ]
-  };
+  if (!userId || !account) {
+    return { requiresLink: true, account: null, files: [] };
+  }
+  try {
+    const drive = await getDriveClient(userId);
+    const res = await drive.files.list({ pageSize: 20, fields: "files(id,name,mimeType)" });
+    return {
+      requiresLink: false,
+      account: {
+        id: account.id,
+        scope: account.scope,
+        refresh_token: account.refresh_token,
+        expires_at: account.expires_at
+      },
+  files: (res.data.files || []).map((f: { id?: string; name?: string; mimeType?: string }) => ({ id: f.id!, name: f.name!, mimeType: f.mimeType! }))
+    };
+  } catch (e) {
+    console.error("[listDriveFiles]", e);
+    return { requiresLink: false, account: null, files: [] };
+  }
 }
+
+// Legacy stub helpers removed: use exportToDocs/exportToSheets instead.

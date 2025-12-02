@@ -71,13 +71,84 @@ Please ${getGoalDescription(goal)}.`;
       throw new Error("No response from OpenAI");
     }
 
-    const parsed = JSON.parse(content);
-    return TradeStudyAnalysisSchema.parse(parsed);
+    let parsed: any;
+    try {
+      parsed = JSON.parse(content);
+    } catch (e) {
+      console.warn("[analyzeTradeStudy] JSON parse failed, wrapping raw content");
+      parsed = { summary: content.slice(0, 400), recommendations: [], nextSteps: [] };
+    }
+
+    let validated = TradeStudyAnalysisSchema.safeParse(parsed);
+    if (!validated.success) {
+      console.warn("[analyzeTradeStudy] first pass schema validation failed", validated.error.issues);
+      // Second attempt with corrective instructions
+      const correctivePrompt = `The previous response failed validation for fields: ${validated.error.issues
+        .map((i) => i.path.join("."))
+        .join(", ")}.
+Return STRICT JSON with keys: summary (string), recommendations (array of strings), nextSteps (array of strings), updatedData (object optionally).
+Do NOT include markdown or commentary outside JSON.`;
+      try {
+        const retry = await openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userPrompt },
+            { role: "assistant", content: content },
+            { role: "user", content: correctivePrompt }
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.3
+        });
+        const retryContent = retry.choices[0]?.message?.content;
+        if (retryContent) {
+          try {
+            const retryParsed = JSON.parse(retryContent);
+            const retryValidated = TradeStudyAnalysisSchema.safeParse(retryParsed);
+            if (retryValidated.success) return retryValidated.data;
+            validated = retryValidated; // use for fallback messaging
+            parsed = retryParsed;
+            console.warn("[analyzeTradeStudy] retry validation failed", retryValidated.error.issues);
+          } catch (e) {
+            console.warn("[analyzeTradeStudy] retry parse failed", e);
+          }
+        }
+      } catch (e) {
+        console.warn("[analyzeTradeStudy] retry attempt failed", e);
+      }
+    } else {
+      return validated.data;
+    }
+
+    // If still not validated, proceed to fallback
+    console.warn("[analyzeTradeStudy] schema validation failed after retry", validated.error.issues);
+    const fallbackRecommendations = Array.isArray(parsed.recommendations)
+      ? parsed.recommendations
+      : buildHeuristicRecommendations(studyData);
+    const fallbackNextSteps = Array.isArray(parsed.nextSteps)
+      ? parsed.nextSteps
+      : ["Refine prompt for structure", "Reduce token size", "Retry analysis", "Add explicit JSON schema notes in prompt"];
+    return {
+      summary:
+        parsed.summary ||
+        `Analysis incomplete. Validation errors: ${validated.error.issues
+          .map((i) => i.path.join("."))
+          .join(", ")}`,
+      recommendations: fallbackRecommendations,
+      nextSteps: fallbackNextSteps,
+      updatedData:
+        parsed.updatedData && typeof parsed.updatedData === "object"
+          ? parsed.updatedData
+          : undefined
+    };
   } catch (error) {
-    console.error("[analyzeTradeStudy] error:", error);
-    throw new Error(
-      `Failed to analyze trade study: ${error instanceof Error ? error.message : "Unknown error"}`
-    );
+    console.error("[analyzeTradeStudy] fatal error:", error);
+    return {
+      summary: `Failed to analyze trade study: ${error instanceof Error ? error.message : "Unknown error"}`,
+      recommendations: [],
+      nextSteps: ["Check OpenAI API key", "Reduce prompt size", "Retry later"],
+      updatedData: studyData
+    };
   }
 }
 
@@ -94,6 +165,23 @@ function getGoalDescription(goal: string): string {
     default:
       return "analyze the trade study and provide actionable insights";
   }
+}
+
+function buildHeuristicRecommendations(data: Record<string, unknown>): string[] {
+  const recs: string[] = [];
+  if (Array.isArray((data as any).criteria) && (data as any).criteria.length === 0) {
+    recs.push("Define 4-8 weighted criteria before scoring.");
+  }
+  if (Array.isArray((data as any).alternatives) && (data as any).alternatives.length < 2) {
+    recs.push("Add at least two credible alternative options.");
+  }
+  if (!Array.isArray((data as any).sources) || (data as any).sources.length === 0) {
+    recs.push("Perform external research to gather objective sources.");
+  }
+  if (!recs.length) {
+    recs.push("Proceed to formal scoring and capture rationale for each criterion.");
+  }
+  return recs;
 }
 
 /**

@@ -16,11 +16,12 @@ model Account {
   refresh_token     String?
   access_token      String?
   expires_at        Int?
+  refresh_token_expires_in Int?
   token_type        String?
   scope             String?
   id_token          String?
   session_state     String?
-  User              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
 }
@@ -30,21 +31,21 @@ model Session {
   sessionToken String   @unique
   userId       String
   expires      DateTime
-  User         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model TradeStudy {
-  id                   String                 @id @default(cuid())
-  title                String
-  summary              String?
-  status               TradeStudyStatus       @default(draft)
-  data                 Json
-  ownerId              String
-  createdAt            DateTime               @default(now())
-  updatedAt            DateTime               @updatedAt
-  User                 User                   @relation(fields: [ownerId], references: [id])
-  TradeStudyAttachment TradeStudyAttachment[]
-  TradeStudyMember     TradeStudyMember[]
+  id          String                 @id @default(cuid())
+  title       String
+  summary     String?
+  status      TradeStudyStatus       @default(draft)
+  data        Json
+  ownerId     String
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  owner       User                   @relation(fields: [ownerId], references: [id])
+  attachments TradeStudyAttachment[]
+  members     TradeStudyMember[]
 }
 
 model TradeStudyAttachment {
@@ -54,7 +55,7 @@ model TradeStudyAttachment {
   fileId       String
   title        String?
   createdAt    DateTime                 @default(now())
-  TradeStudy   TradeStudy               @relation(fields: [tradeStudyId], references: [id], onDelete: Cascade)
+  tradeStudy   TradeStudy               @relation(fields: [tradeStudyId], references: [id], onDelete: Cascade)
 }
 
 model TradeStudyMember {
@@ -63,24 +64,24 @@ model TradeStudyMember {
   userId       String
   tradeStudyId String
   createdAt    DateTime       @default(now())
-  TradeStudy   TradeStudy     @relation(fields: [tradeStudyId], references: [id], onDelete: Cascade)
-  User         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tradeStudy   TradeStudy     @relation(fields: [tradeStudyId], references: [id], onDelete: Cascade)
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, tradeStudyId])
 }
 
 model User {
-  id               String             @id @default(cuid())
-  name             String?
-  email            String?            @unique
-  emailVerified    DateTime?
-  image            String?
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
-  Account          Account[]
-  Session          Session[]
-  TradeStudy       TradeStudy[]
-  TradeStudyMember TradeStudyMember[]
+  id            String             @id @default(cuid())
+  name          String?
+  email         String             @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  accounts      Account[]
+  sessions      Session[]
+  tradeStudies  TradeStudy[]
+  memberships   TradeStudyMember[]
 }
 
 model VerificationToken {

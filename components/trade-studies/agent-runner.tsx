@@ -81,12 +81,7 @@ export function AgentRunner({ tradeStudyId }: { tradeStudyId: string }) {
       const data = await response.json();
       setResult(data);
 
-      // Refresh the page after successful run to show updated data
-      if (data.success) {
-        setTimeout(() => {
-          window.location.reload();
-        }, 3000);
-      }
+  // Removed auto-reload to allow user to read messages; manual refresh button provided.
     } catch (error) {
       setResult({
         success: false,
@@ -246,10 +241,21 @@ export function AgentRunner({ tradeStudyId }: { tradeStudyId: string }) {
               </div>
             )}
 
-            {result.success && (
-              <p className="text-xs text-muted-foreground">
-                Page will refresh in 3 seconds to show updated data...
-              </p>
+            {result && result.success && (
+              <div className="flex flex-col gap-2 pt-2">
+                <p className="text-xs text-muted-foreground">
+                  Agent finished. Review results below. Refresh manually if you need latest persisted data.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => window.location.reload()}
+                  className="self-start"
+                >
+                  Refresh Study Data
+                </Button>
+              </div>
             )}
           </div>
         )}

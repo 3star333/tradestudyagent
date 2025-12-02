@@ -14,6 +14,7 @@ export type AgentRequest = {
   tradeStudyId: string;
   goal: AgentGoal;
   extraContext?: string;
+  userId?: string;
   publishTargets?: {
     doc?: boolean;
     sheet?: boolean;
@@ -36,7 +37,7 @@ export type AgentResult = {
  * Routes the goal to appropriate tools and returns results
  */
 export async function runAgent(request: AgentRequest): Promise<AgentResult> {
-  const { tradeStudyId, goal, extraContext, publishTargets } = request;
+  const { tradeStudyId, goal, extraContext, publishTargets, userId } = request;
   const steps: Array<{ tool: string; status: string; message: string }> = [];
 
   try {
@@ -119,7 +120,8 @@ export async function runAgent(request: AgentRequest): Promise<AgentResult> {
         } else {
           publishResults = await tools.publishToGoogle.execute({
             tradeStudyId,
-            targets: publishTargets
+            targets: publishTargets,
+            userId
           });
           steps.push({
             tool: "publish_to_google",
@@ -159,7 +161,8 @@ export async function runAgent(request: AgentRequest): Promise<AgentResult> {
         if (publishTargets && Object.keys(publishTargets).length > 0) {
           publishResults = await tools.publishToGoogle.execute({
             tradeStudyId,
-            targets: publishTargets
+            targets: publishTargets,
+            userId
           });
           steps.push({
             tool: "publish_to_google",

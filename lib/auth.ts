@@ -5,9 +5,24 @@ import GoogleProvider from "next-auth/providers/google";
 
 import { db } from "./db";
 
+// Wrap adapter to strip unsupported provider fields
+function SanitizedPrismaAdapter() {
+  const base = PrismaAdapter(db);
+  return {
+    ...base,
+  async linkAccount(account: any) {
+      // Remove field prisma may not support yet
+      if ("refresh_token_expires_in" in account) {
+        delete (account as any).refresh_token_expires_in;
+      }
+      return base.linkAccount(account);
+    }
+  } as typeof base;
+}
+
 export const authOptions: NextAuthOptions = {
   debug: process.env.NODE_ENV === "development", // Enable debug logs in development
-  adapter: PrismaAdapter(db),
+  adapter: SanitizedPrismaAdapter(),
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID || "",
@@ -35,9 +50,28 @@ export const authOptions: NextAuthOptions = {
     signIn: "/login"
   },
   session: {
-    strategy: "database"
+    strategy: "jwt"
   },
   callbacks: {
+    async jwt({ token, user, account }) {
+      if (user) {
+        token.id = user.id;
+        token.email = user.email;
+        token.name = user.name;
+      }
+      if (account?.provider === "google") {
+        token.googleLinked = true;
+      }
+      return token;
+    },
+    async signIn({ user, account, profile }) {
+      console.log("[signIn callback] user=", user?.id, "email=", user?.email, "provider=", account?.provider);
+      if (!user.email) {
+        console.warn("[signIn callback] Rejecting login: missing email");
+        return false;
+      }
+      return true;
+    },
     async redirect({ url, baseUrl }) {
       // Allows relative callback URLs
       if (url.startsWith("/")) return `${baseUrl}${url}`;
@@ -45,9 +79,10 @@ export const authOptions: NextAuthOptions = {
       else if (new URL(url).origin === baseUrl) return url;
       return baseUrl + "/dashboard";
     },
-    session: async ({ session, user }): Promise<Session> => {
-      if (session?.user) {
-        session.user.id = user.id;
+    session: async ({ session, token }): Promise<Session> => {
+      if (session.user) {
+        session.user.id = (token.id as string) || session.user.id;
+        (session.user as any).googleLinked = Boolean(token.googleLinked);
       }
       return session;
     }
@@ -67,6 +102,7 @@ export const authOptions: NextAuthOptions = {
           id_token: account.id_token ?? undefined
         }
       });
+      console.log("[linkAccount event] Updated tokens for user", user.id, "provider", account.provider);
     }
   }
 };

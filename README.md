@@ -47,6 +47,130 @@ UI → API Endpoint → Orchestrator → Tools → Services
 
 See **[AGENT_SETUP.md](./AGENT_SETUP.md)** for detailed documentation.
 
+## 🧪 Autonomous Trade Study Generator (New)
+
+You can now generate a complete trade study from just a topic statement.
+
+### Features
+- Automatic criteria (4–10 weighted items)
+- Alternative solutions enumeration
+- Research pass (web search + source summaries) with selectable depth
+- Scoring matrix (0–10 per criterion, weighted total)
+- Winner identification and enrichment analysis
+- Optional artifact export (Docs / Sheets stubbed)
+
+### How to Use (UI)
+1. Navigate to `Create` → `/trade-studies/new`
+2. Enter a topic (e.g. "Select a vector database for AI memory")
+3. (Optional) Provide a Google Drive folder ID
+4. Choose research depth: Quick / Standard / Deep
+5. Click `Generate Study`
+6. Auto-redirect to the new study once complete
+
+### How to Use (API)
+`POST /api/trade-studies/generate`
+```json
+{
+   "topic": "Select a vector database for AI memory",
+   "depth": "standard",
+   "folderId": "<drive-folder-id-optional>",
+   "generateArtifacts": true
+}
+```
+Response:
+```json
+{
+   "ok": true,
+   "result": {
+      "studyId": "...",
+      "criteria": [ { "name": "Cost", "weight": 0.2, "description": "..." } ],
+      "alternatives": [ { "name": "Option A", "rationale": "..." } ],
+      "scored": [ { "name": "Option A", "scores": { "Cost": 7 }, "weightedTotal": 6.4 } ],
+      "winner": { "name": "Option A", "weightedTotal": 6.4, "scores": { "Cost": 7 } },
+      "researchSummary": "...",
+      "sources": [ { "title": "...", "url": "..." } ]
+   }
+}
+```
+
+### Internal Orchestration
+`lib/tradeStudyGenerator.ts` handles:
+1. Research (`researchTools.researchContext`)
+2. Criteria generation (LLM JSON schema)
+3. Alternatives generation (LLM)
+4. Scoring (LLM + research context)
+5. Persistence (`createTradeStudy`) + enrichment analysis (`analyzeTradeStudy`)
+6. Artifact export stubs (`exportToDocs`, `exportToSheets`) + attachment linking
+
+Add your real Google Docs/Sheets integration by replacing stubbed functions in `lib/google.ts` with API calls and capturing returned file IDs.
+
+## 📄 Real Google Integration (Per-User OAuth)
+
+Implemented per-user OAuth using stored tokens in the `Account` table (NextAuth). No service account required.
+
+### Scopes Used
+```
+openid email profile
+https://www.googleapis.com/auth/drive
+https://www.googleapis.com/auth/documents
+https://www.googleapis.com/auth/spreadsheets
+https://www.googleapis.com/auth/presentations.readonly
+```
+
+### Key Files
+- `lib/googleClient.ts` – Creates OAuth2 client, auto refreshes access tokens (< 2 min to expiry)
+- `lib/google.ts` – Real implementations for exporting Docs & Sheets and listing Drive files
+- `lib/tradeStudyGenerator.ts` – Passes `userId` & `folderId` for artifact creation
+
+### How It Works
+1. User links Google via NextAuth (refresh + access tokens saved in `Account` row).
+2. When generating a study, the generator calls `exportToDocs` / `exportToSheets` with `userId`.
+3. A new Google Doc and Sheet are created in Drive (optionally inside provided folder).
+4. Content inserted (criteria, alternatives, scoring matrix).
+5. File IDs attached to the trade study.
+6. Token refresh occurs automatically when approaching expiry.
+
+### Environment Variables Needed
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `NEXTAUTH_URL` (for OAuth redirect in production)
+
+### Future Enhancements
+- Slides export
+- Rich formatting (headings, tables, conditional formatting)
+- Folder picker UI
+- Retry + exponential backoff for API rate limits
+
+## 🎨 Fighter Jet HUD Theme
+
+The UI uses a dark slate cockpit palette with radar green (`--primary`) and afterburner amber (`--accent`).
+
+Key tokens in `app/globals.css`:
+```
+--background: Cockpit dark slate
+--primary: Radar green
+--accent: Afterburner amber
+--glow-green / --glow-amber: HUD glow shadows
+```
+
+Tailwind extensions (`tailwind.config.ts`): custom `hud` font stack (Rajdhani), glow shadows, jet grid backgrounds.
+
+Button variants:
+- `variant="hud"` – subtle outlined radar style
+- `variant="warning"` – amber alert/glow
+
+Add scanline overlay via `.hud-scanlines` class on `<body>`.
+
+
+
+### CLI Script
+Run quick generation without UI:
+```bash
+ts-node scripts/generate-trade-study.ts "Select a vector database for AI memory"
+```
+Set `DEMO_USER_ID` to control the user id used when no auth session is present.
+
+
 ## Stack
 
 - **Framework**: Next.js 14 + App Router + TypeScript
@@ -60,35 +184,51 @@ See **[AGENT_SETUP.md](./AGENT_SETUP.md)** for detailed documentation.
 ## Getting started
 
 ### Prerequisites
-- Node.js 18+ (20+ recommended)
+ ✅ **Publish** results to Google Docs / Sheets / Slides (real per-user OAuth)
 - PostgreSQL (optional - falls back to demo data)
 - OpenAI API key
 - Google OAuth credentials
+Real Google Docs/Sheets/Slides integration implemented via per-user OAuth (`exportToDocs`, `exportToSheets`, `exportToSlides`). Each export returns a status object and fileId.
 
 ### Setup
 ### Setup
-
+ https://www.googleapis.com/auth/presentations
 1. **Install dependencies:**
    ```bash
-   npm install
-   ```
-
+ `lib/google.ts` – Implements `exportToDocs`, `exportToSheets`, `exportToSlides`, `uploadToDrive`
 2. **Configure environment:**
    ```bash
-   cp .env.example .env.local
-   ```
+### Future Enhancements
+- Rich Docs/Sheets formatting (tables, conditional formatting)
+- Slide content enrichment (bullet points, charts)
    
-   Edit `.env.local` and set:
+ **Integrations**: Google Docs/Sheets/Slides/Drive (per-user OAuth)
    - `OPENAI_API_KEY` - Get from https://platform.openai.com/api-keys (REQUIRED for agent)
    - `NEXTAUTH_SECRET` - Generate with `openssl rand -base64 32`
-   - `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` - From Google Cloud Console
-   - `DATABASE_URL` - PostgreSQL connection string (optional - uses demo data if not set)
+### Google Publishing Details
 
-3. **Set up database (optional):**
+Already enabled via per-user OAuth. Ensure tokens exist in the `Account` table after Google sign-in. Exports create real files and attach IDs.
+
+If you need service-account based batch operations for shared team drives, you can add a parallel implementation; current code prefers user ownership for clarity/auditing.
+
+See detailed instructions in [AGENT_SETUP.md](./AGENT_SETUP.md) for extending artifact content.
    ```bash
-   npx prisma generate
+Real export logic implemented; extend formatting/Slides content as needed.
    npx prisma migrate dev --name init
    ```
+
+## 🔧 Troubleshooting Google Exports
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| Status shows `skipped` | Missing Google tokens | Re-link Google account (logout/login) |
+| Status `error` with 403 | Insufficient scopes / revoked consent | Verify scopes in `lib/auth.ts`, re-consent |
+| Status `error` with 401 | Expired token & refresh failed | Re-link Google account |
+| No `Account` row | User never completed OAuth | Click "Link Google" button in header |
+| Slides export fails | Presentations scope missing | Add presentations scope & re-auth |
+| Docs created but empty | API write partial failure | Check server logs; retry export |
+
+Additional debug: inspect server logs for `[exportToDocs]`, `[exportToSheets]`, `[exportToSlides]` prefixes.
 
 4. **Start dev server:**
    ```bash
