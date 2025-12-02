@@ -100,9 +100,9 @@ Response:
 3. Alternatives generation (LLM)
 4. Scoring (LLM + research context)
 5. Persistence (`createTradeStudy`) + enrichment analysis (`analyzeTradeStudy`)
-6. Artifact export stubs (`exportToDocs`, `exportToSheets`) + attachment linking
+6. Artifact export (`exportToDocs`, `exportToSheets`, `exportToSlides`) + attachment linking
 
-Add your real Google Docs/Sheets integration by replacing stubbed functions in `lib/google.ts` with API calls and capturing returned file IDs.
+Google Docs/Sheets integration is implemented using direct API create calls. Sheets are generated via deterministic JSON parsing (no LLM dependency) for reliability. See `lib/google.ts`.
 
 ## 📄 Real Google Integration (Per-User OAuth)
 
@@ -126,7 +126,7 @@ https://www.googleapis.com/auth/presentations.readonly
 1. User links Google via NextAuth (refresh + access tokens saved in `Account` row).
 2. When generating a study, the generator calls `exportToDocs` / `exportToSheets` with `userId`.
 3. A new Google Doc and Sheet are created in Drive (optionally inside provided folder).
-4. Content inserted (criteria, alternatives, scoring matrix).
+4. Content inserted (criteria, alternatives, scoring matrix) using a deterministic JSON parser for Sheets.
 5. File IDs attached to the trade study.
 6. Token refresh occurs automatically when approaching expiry.
 
@@ -136,10 +136,11 @@ https://www.googleapis.com/auth/presentations.readonly
 - `NEXTAUTH_URL` (for OAuth redirect in production)
 
 ### Future Enhancements
-- Slides export
-- Rich formatting (headings, tables, conditional formatting)
+- Slides content enrichment (currently basic creation only)
+- Rich formatting (Docs headings/table structure; Sheets conditional formatting & formulas)
 - Folder picker UI
 - Retry + exponential backoff for API rate limits
+- Portfolio dashboard summarizing multiple studies
 
 ## 🎨 Fighter Jet HUD Theme
 
@@ -188,7 +189,7 @@ Set `DEMO_USER_ID` to control the user id used when no auth session is present.
 - PostgreSQL (optional - falls back to demo data)
 - OpenAI API key
 - Google OAuth credentials
-Real Google Docs/Sheets/Slides integration implemented via per-user OAuth (`exportToDocs`, `exportToSheets`, `exportToSlides`). Each export returns a status object and fileId.
+Real Google Docs/Sheets/Slides integration implemented via per-user OAuth (`exportToDocs`, `exportToSheets`, `exportToSlides`). Each export returns a status object and fileId. Sheets matrix generation is deterministic (pure JSON parsing) for consistent scoring.
 
 ### Setup
 ### Setup
@@ -213,7 +214,7 @@ If you need service-account based batch operations for shared team drives, you c
 
 See detailed instructions in [AGENT_SETUP.md](./AGENT_SETUP.md) for extending artifact content.
    ```bash
-Real export logic implemented; extend formatting/Slides content as needed.
+Real export logic implemented; extend formatting/Slides content as needed. Spreadsheet generation does not use LLM—scores come directly from persisted JSON.
    npx prisma migrate dev --name init
    ```
 

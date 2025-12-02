@@ -42,31 +42,22 @@ export async function exportToDocs({ tradeStudyId, payload, userId, folderId }: 
     }
     if (sections.length === 0) return { status: "ok", artifact: "doc", fileId: documentId, message: "Doc created (no content)" };
 
-    const requests = sections.map((s: any, idx: number) => ({
+    // Phase 1: insert narrative sections
+    const narrativeRequests = sections.map((s: any, idx: number) => ({
       insertText: { endOfSegmentLocation: {}, text: `${idx === 0 ? '' : '\n\n'}${s.heading}\n${s.body}` }
     }));
+    await docs.documents.batchUpdate({ documentId, requestBody: { requests: narrativeRequests } });
+    console.log(`[exportToDocs] narrative sections inserted for ${documentId}`);
 
-    // Simple retry wrapper
-    const attemptBatch = async () => {
-      return await docs.documents.batchUpdate({ documentId, requestBody: { requests } });
-    };
-    let lastErr: any;
-    for (let i = 0; i < 3; i++) {
-      try {
-    const resp = await attemptBatch();
-    console.log(`[exportToDocs] batchUpdate success id=${resp.data.documentId}`);
-        return { status: "ok", artifact: "doc", fileId: documentId, message: "Doc populated" };
-      } catch (e) {
-    lastErr = e;
-        const backoff = 300 * (i + 1);
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn(`[exportToDocs] batchUpdate attempt ${i + 1} failed; retrying in ${backoff}ms: ${msg}`);
-        await new Promise(r => setTimeout(r, backoff));
-      }
+    // Phase 2: textual evaluation block (matrix) appended
+    const criteria = data.criteria || [];
+    const scored = data.scored || [];
+    if (criteria.length && scored.length) {
+      const evalBlock = buildEvaluationBlock(criteria, scored);
+      await docs.documents.batchUpdate({ documentId, requestBody: { requests: [ { insertText: { endOfSegmentLocation: {}, text: `\n\nEvaluation Scores\n${evalBlock}` } } ] } });
+      console.log(`[exportToDocs] evaluation block inserted for ${documentId}`);
     }
-  const finalMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-  console.error("[exportToDocs] failed after retries", finalMsg);
-    return { status: "error", artifact: "doc", fileId: documentId, message: lastErr instanceof Error ? lastErr.message : String(lastErr) };
+    return { status: "ok", artifact: "doc", fileId: documentId, message: "Doc populated" };
   } catch (e) {
     console.error("[exportToDocs] fatal", e);
     return { status: "error", artifact: "doc", message: e instanceof Error ? e.message : String(e) };
@@ -123,7 +114,7 @@ async function generateLLMDocumentSections(study: any): Promise<Array<{ heading:
   if (!process.env.OPENAI_API_KEY) return [];
   try {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const prompt = `You are producing a formal trade study document. Convert the following JSON into a structured document with the following ordered sections:\n1. Executive Summary\n2. Problem Statement\n3. Evaluation Criteria\n4. Alternatives Considered\n5. Comparative Analysis\n6. Scoring Matrix Overview\n7. Recommendation\n8. Risks & Mitigations\n9. Next Steps\n\nRules:\n- Return STRICT JSON array where each item has {\"heading\": string, \"body\": string}.\n- Keep each body under ~800 words.\n- Derive content only from provided JSON; if data missing, note assumptions.\n- Recommendation must name the leading alternative if present.\n\nJSON:\n${JSON.stringify(study, null, 2)}\n`; 
+  const prompt = `You are producing a formal trade study document. Convert the following JSON into a structured document with the following ordered sections:\n1. Executive Summary\n2. Problem Statement\n3. Evaluation Criteria\n4. Alternatives Considered\n5. Comparative Analysis\n6. Detailed Evaluation Scores\n7. Scoring Matrix Overview\n8. Recommendation\n9. Risks & Mitigations\n10. Next Steps\n\nRules:\n- Return STRICT JSON array where each item has {\"heading\": string, \"body\": string}.\n- Keep each body under ~800 words.\n- Derive content only from provided JSON; if data missing, note assumptions.\n- In Detailed Evaluation Scores list each alternative with each criterion score and weighted total (readable text format).\n- Recommendation must name the leading alternative if present.\n\nJSON:\n${JSON.stringify(study, null, 2)}\n`; 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -149,22 +140,65 @@ async function generateLLMDocumentSections(study: any): Promise<Array<{ heading:
   }
 }
 
+// Deterministic spreadsheet matrix builder (JSON parser approach)
+function buildSpreadsheetMatrixFromStudy(params: { criteria?: any[]; scored?: any[] }) {
+  const { criteria = [], scored = [] } = params;
+  const header = ["Alternative", ...criteria.map(c => c.name), "Weighted Total"];
+  const rows = scored.map(s => {
+    const cells = [s.name, ...criteria.map(c => {
+      const val = s.scores?.[c.name];
+      return typeof val === 'number' ? val : 0;
+    }), s.weightedTotal];
+    return cells;
+  });
+  return { header, rows };
+}
+
+// Docs scoring table helper
+async function insertScoringTable(params: { docs: any; documentId: string; criteria: any[]; scored: any[] }) {
+  const { docs, documentId, criteria, scored } = params;
+  const rows = scored.length + 1;
+  const cols = criteria.length + 2;
+  // Create table
+  await docs.documents.batchUpdate({ documentId, requestBody: { requests: [ { createTable: { endOfSegmentLocation: {}, rows, columns: cols } } ] } });
+  // Populate cells in a second batch (Google Docs requires tableStartLocation reference)
+  const headerTexts = ["Alternative", ...criteria.map(c => c.name), "Weighted Total"];
+  const cellRequests: any[] = [];
+  headerTexts.forEach((text, colIndex) => {
+    cellRequests.push({ insertText: { text, tableCellLocation: { tableStartLocation: { endOfSegmentLocation: {} }, rowIndex: 0, columnIndex: colIndex } } });
+  });
+  scored.forEach((alt, rowIdx) => {
+    const cells = [alt.name, ...criteria.map(c => (alt.scores?.[c.name] ?? 0).toString()), alt.weightedTotal?.toString()];
+    cells.forEach((cellText, colIndex) => {
+      cellRequests.push({ insertText: { text: cellText, tableCellLocation: { tableStartLocation: { endOfSegmentLocation: {} }, rowIndex: rowIdx + 1, columnIndex: colIndex } } });
+    });
+  });
+  await docs.documents.batchUpdate({ documentId, requestBody: { requests: cellRequests } });
+}
+
+// Plain text evaluation block fallback (pipe-delimited)
+function buildEvaluationBlock(criteria: any[], scored: any[]) {
+  const header = ["Alternative", ...criteria.map(c => c.name), "Weighted Total"];
+  const lines = [header.join(" | ")];
+  scored.forEach(alt => {
+    const row = [alt.name, ...criteria.map(c => (alt.scores?.[c.name] ?? 0)), alt.weightedTotal];
+    lines.push(row.join(" | "));
+  });
+  return lines.join("\n");
+}
+
 export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }: ExportPayload & { userId?: string; matrix?: any; folderId?: string }) {
   try {
     if (!userId) return { status: "skipped", artifact: "sheet", message: "No userId provided" };
-  const study = await getTradeStudyById(String(tradeStudyId));
+    const study = await getTradeStudyById(String(tradeStudyId));
     const sheets = await getSheetsClient(userId);
     const title = study?.title || `Trade Study Scoring ${tradeStudyId}`;
     const criteria: any[] = matrix?.criteria || [];
     const scored: any[] = matrix?.scored || [];
     const recommendations: string[] = matrix?.recommendations || [];
 
-  // Attempt LLM matrix generation (adds Rationale column) before deterministic build
-  let llmMatrix = await generateLLMSpreadsheetMatrix({ title, criteria, scored, recommendations, raw: matrix });
-  const scoringHeader = llmMatrix?.header || ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
-  const scoringRows = llmMatrix?.rows || scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
-
-    const sheet1Values = [scoringHeader, ...scoringRows];
+    const deterministic = buildSpreadsheetMatrixFromStudy({ criteria, scored });
+    const sheet1Values = [deterministic.header, ...deterministic.rows];
     const sheet2Values = [["Criterion", "Weight", "Description"], ...criteria.map((c) => [c.name, c.weight, c.description]), [""], ["Recommendations"], ...recommendations.map(r => [r || ""])];
 
     const created = await sheets.spreadsheets.create({
@@ -209,45 +243,6 @@ export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }:
   } catch (e) {
     console.error("[exportToSheets] fatal", e);
     return { status: "error", artifact: "sheet", message: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-// LLM matrix generator for spreadsheet scoring (optional richer rationale rows)
-async function generateLLMSpreadsheetMatrix(study: any): Promise<{ header: string[]; rows: string[][] } | null> {
-  if (!process.env.OPENAI_API_KEY) return null;
-  try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const prompt = `You are constructing a scoring matrix table from trade study JSON. Output STRICT JSON with:
-{
-  "header": ["Alternative", "<criterion1>", ..., "Weighted Total", "Rationale"],
-  "rows": [ [ ... ], ... ]
-}
-Rules:
-- Weighted Total must match sum(score * weight) rounded to 3 decimals.
-- Include a concise 1-2 sentence Rationale per row.
-- Scores are 0-10 numbers.
-Input JSON:
-${JSON.stringify(study, null, 2)}
-`; 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You convert structured trade study data into scoring matrices." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.3
-    });
-    const raw = completion.choices[0]?.message?.content?.trim() || "";
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start === -1 || end === -1) return null;
-    const slice = raw.slice(start, end + 1);
-    const parsed = JSON.parse(slice);
-    if (!parsed.header || !parsed.rows) return null;
-    return { header: parsed.header, rows: parsed.rows };
-  } catch (e) {
-    console.warn("[generateLLMSpreadsheetMatrix] failed", e instanceof Error ? e.message : String(e));
-    return null;
   }
 }
 
