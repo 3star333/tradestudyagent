@@ -15,8 +15,12 @@ export function AuthActions() {
 
   if (!session?.user) {
     return (
-      <Button variant="secondary" size="sm" onClick={() => signIn("google")}
-        className="gap-2">
+      <Button 
+        variant="secondary" 
+        size="sm" 
+        onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
+        className="gap-2"
+      >
         <LogIn className="h-4 w-4" />
         Sign in with Google
       </Button>

@@ -37,6 +37,13 @@ export const authOptions: NextAuthOptions = {
     strategy: "database"
   },
   callbacks: {
+    async redirect({ url, baseUrl }) {
+      // Allows relative callback URLs
+      if (url.startsWith("/")) return `${baseUrl}${url}`;
+      // Allows callback URLs on the same origin
+      else if (new URL(url).origin === baseUrl) return url;
+      return baseUrl + "/dashboard";
+    },
     session: async ({ session, user }): Promise<Session> => {
       if (session?.user) {
         session.user.id = user.id;
