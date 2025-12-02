@@ -35,16 +35,16 @@ export async function exportToDocs({ tradeStudyId, payload, userId, folderId }: 
     }
 
     const data = (payload as any) || study?.data || {};
-    const sections = data.criteria ? await buildDocSectionsWithNarrative({ ...data, topic: title }) : [];
+    // Attempt LLM rich sections first, fallback to heuristic narrative
+    let sections = await generateLLMDocumentSections({ title, ...data });
+    if (!sections.length) {
+      sections = data.criteria ? await buildDocSectionsWithNarrative({ ...data, topic: title }) : [];
+    }
     if (sections.length === 0) return { status: "ok", artifact: "doc", fileId: documentId, message: "Doc created (no content)" };
 
-    const requests = sections.flatMap((s: any, idx: number) => {
-      return [
-        {
-          insertText: { endOfSegmentLocation: {}, text: (idx === 0 ? "" : "\n\n") + s.heading + "\n" + s.body }
-        }
-      ];
-    });
+    const requests = sections.map((s: any, idx: number) => ({
+      insertText: { endOfSegmentLocation: {}, text: `${idx === 0 ? '' : '\n\n'}${s.heading}\n${s.body}` }
+    }));
 
     // Simple retry wrapper
     const attemptBatch = async () => {
@@ -116,6 +116,37 @@ Return ONLY plain text.`;
   }
 
   return baseSections;
+}
+
+// LLM structured section generator
+async function generateLLMDocumentSections(study: any): Promise<Array<{ heading: string; body: string }>> {
+  if (!process.env.OPENAI_API_KEY) return [];
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const prompt = `You are producing a formal trade study document. Convert the following JSON into a structured document with the following ordered sections:\n1. Executive Summary\n2. Problem Statement\n3. Evaluation Criteria\n4. Alternatives Considered\n5. Comparative Analysis\n6. Scoring Matrix Overview\n7. Recommendation\n8. Risks & Mitigations\n9. Next Steps\n\nRules:\n- Return STRICT JSON array where each item has {\"heading\": string, \"body\": string}.\n- Keep each body under ~800 words.\n- Derive content only from provided JSON; if data missing, note assumptions.\n- Recommendation must name the leading alternative if present.\n\nJSON:\n${JSON.stringify(study, null, 2)}\n`; 
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You transform structured trade study data into polished technical documents." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.4
+    });
+    const raw = completion.choices[0]?.message?.content?.trim() || "";
+    const start = raw.indexOf("[");
+    const end = raw.lastIndexOf("]");
+    if (start === -1 || end === -1) {
+      console.warn("[generateLLMDocumentSections] JSON array not found in response");
+      return [];
+    }
+    const slice = raw.slice(start, end + 1);
+    const parsed = JSON.parse(slice);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(s => s && s.heading && s.body).map(s => ({ heading: s.heading, body: s.body }));
+  } catch (e) {
+    console.warn("[generateLLMDocumentSections] failed", e instanceof Error ? e.message : String(e));
+    return [];
+  }
 }
 
 export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }: ExportPayload & { userId?: string; matrix?: any; folderId?: string }) {
