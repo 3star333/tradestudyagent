@@ -159,8 +159,11 @@ export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }:
     const scored: any[] = matrix?.scored || [];
     const recommendations: string[] = matrix?.recommendations || [];
 
-    const scoringHeader = ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
-    const scoringRows = scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
+  // Attempt LLM matrix generation (adds Rationale column) before deterministic build
+  let llmMatrix = await generateLLMSpreadsheetMatrix({ title, criteria, scored, recommendations, raw: matrix });
+  const scoringHeader = llmMatrix?.header || ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
+  const scoringRows = llmMatrix?.rows || scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
+
     const sheet1Values = [scoringHeader, ...scoringRows];
     const sheet2Values = [["Criterion", "Weight", "Description"], ...criteria.map((c) => [c.name, c.weight, c.description]), [""], ["Recommendations"], ...recommendations.map(r => [r || ""])];
 
@@ -206,6 +209,45 @@ export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }:
   } catch (e) {
     console.error("[exportToSheets] fatal", e);
     return { status: "error", artifact: "sheet", message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// LLM matrix generator for spreadsheet scoring (optional richer rationale rows)
+async function generateLLMSpreadsheetMatrix(study: any): Promise<{ header: string[]; rows: string[][] } | null> {
+  if (!process.env.OPENAI_API_KEY) return null;
+  try {
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const prompt = `You are constructing a scoring matrix table from trade study JSON. Output STRICT JSON with:
+{
+  "header": ["Alternative", "<criterion1>", ..., "Weighted Total", "Rationale"],
+  "rows": [ [ ... ], ... ]
+}
+Rules:
+- Weighted Total must match sum(score * weight) rounded to 3 decimals.
+- Include a concise 1-2 sentence Rationale per row.
+- Scores are 0-10 numbers.
+Input JSON:
+${JSON.stringify(study, null, 2)}
+`; 
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: "You convert structured trade study data into scoring matrices." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.3
+    });
+    const raw = completion.choices[0]?.message?.content?.trim() || "";
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start === -1 || end === -1) return null;
+    const slice = raw.slice(start, end + 1);
+    const parsed = JSON.parse(slice);
+    if (!parsed.header || !parsed.rows) return null;
+    return { header: parsed.header, rows: parsed.rows };
+  } catch (e) {
+    console.warn("[generateLLMSpreadsheetMatrix] failed", e instanceof Error ? e.message : String(e));
+    return null;
   }
 }
 
