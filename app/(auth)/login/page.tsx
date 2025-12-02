@@ -1,3 +1,6 @@
+"use client";
+
+import { signIn } from "next-auth/react";
 import { LogIn } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -14,13 +17,13 @@ export default function LoginPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form action="/api/auth/signin/google" method="post" className="space-y-4">
-            <input type="hidden" name="callbackUrl" value="/dashboard" />
-            <Button type="submit" className="w-full gap-2">
-              <LogIn className="h-4 w-4" />
-              Continue with Google
-            </Button>
-          </form>
+          <Button 
+            onClick={() => signIn("google", { callbackUrl: "/dashboard" })}
+            className="w-full gap-2"
+          >
+            <LogIn className="h-4 w-4" />
+            Continue with Google
+          </Button>
         </CardContent>
       </Card>
     </div>

@@ -8,7 +8,7 @@ datasource db {
 }
 
 model Account {
-  id                String  @id
+  id                String  @id @default(cuid())
   userId            String
   type              String
   provider          String
@@ -26,7 +26,7 @@ model Account {
 }
 
 model Session {
-  id           String   @id
+  id           String   @id @default(cuid())
   sessionToken String   @unique
   userId       String
   expires      DateTime
@@ -34,21 +34,21 @@ model Session {
 }
 
 model TradeStudy {
-  id                   String                 @id
+  id                   String                 @id @default(cuid())
   title                String
   summary              String?
   status               TradeStudyStatus       @default(draft)
   data                 Json
   ownerId              String
   createdAt            DateTime               @default(now())
-  updatedAt            DateTime
+  updatedAt            DateTime               @updatedAt
   User                 User                   @relation(fields: [ownerId], references: [id])
   TradeStudyAttachment TradeStudyAttachment[]
   TradeStudyMember     TradeStudyMember[]
 }
 
 model TradeStudyAttachment {
-  id           String                   @id
+  id           String                   @id @default(cuid())
   tradeStudyId String
   type         TradeStudyAttachmentType
   fileId       String
@@ -58,7 +58,7 @@ model TradeStudyAttachment {
 }
 
 model TradeStudyMember {
-  id           String         @id
+  id           String         @id @default(cuid())
   role         TradeStudyRole @default(collaborator)
   userId       String
   tradeStudyId String
@@ -70,13 +70,13 @@ model TradeStudyMember {
 }
 
 model User {
-  id               String             @id
+  id               String             @id @default(cuid())
   name             String?
   email            String?            @unique
   emailVerified    DateTime?
   image            String?
   createdAt        DateTime           @default(now())
-  updatedAt        DateTime
+  updatedAt        DateTime           @updatedAt
   Account          Account[]
   Session          Session[]
   TradeStudy       TradeStudy[]
