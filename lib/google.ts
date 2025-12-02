@@ -11,41 +11,53 @@ interface ExportPayload {
   payload?: unknown;
 }
 
-export async function exportToDocs({ tradeStudyId, payload }: ExportPayload & { userId?: string; folderId?: string }) {
+export async function exportToDocs({ tradeStudyId, payload, userId, folderId }: ExportPayload & { userId?: string; folderId?: string }) {
   if (!payload || !tradeStudyId) return { status: "error", artifact: "doc", message: "Missing payload or tradeStudyId" };
   if (!payload || typeof payload !== "object") return { status: "error", artifact: "doc", message: "Invalid payload" };
-  const userId = (payload as any).userId || (arguments[0] as any).userId;
   try {
     if (!userId) return { status: "skipped", artifact: "doc", message: "No userId provided" };
-    const docs = await getDocsClient(userId);
     const drive = await getDriveClient(userId);
-  const title = (payload as any).title || (payload as any).topic || `Trade Study ${tradeStudyId}`;
-    // Create empty doc via Drive
+    const docs = await getDocsClient(userId);
+    const title = (payload as any).title || (payload as any).topic || `Trade Study ${tradeStudyId}`;
+    // Create doc (empty)
     const fileMeta: any = await drive.files.create({
-      requestBody: { name: title, mimeType: "application/vnd.google-apps.document", parents: (arguments[0] as any).folderId ? [(arguments[0] as any).folderId] : undefined }
+      requestBody: {
+        name: title,
+        mimeType: "application/vnd.google-apps.document",
+        parents: folderId ? [folderId] : undefined
+      }
     });
     const fileId = fileMeta.data.id;
-    // Insert content using Docs batchUpdate
-  const sections = (payload as any).criteria ? await buildDocSectionsWithNarrative(payload as any) : [];
-    const requests = sections.flatMap((s: any, idx: number) => {
-      const prefix = idx === 0 ? "" : "\n\n";
-      return [
-        {
-          insertText: {
-            location: { index: 1 },
-            text: `${prefix}${s.heading}\n${s.body}`
-          }
-        }
-      ];
-    });
-    if (requests.length) {
-      await docs.documents.batchUpdate({ documentId: fileId!, requestBody: { requests } });
+    if (!fileId) return { status: "error", artifact: "doc", message: "Failed to create document" };
+
+    const sections = (payload as any).criteria ? await buildDocSectionsWithNarrative(payload as any) : [];
+    if (sections.length === 0) {
+      return { status: "ok", artifact: "doc", fileId, message: "Doc created (no sections)" };
     }
-  console.log(`[exportToDocs] Created doc ${fileId} for study ${tradeStudyId}`);
-  return { status: "ok", artifact: "doc", fileId, message: "Doc created" };
+
+    // Build a single insert request using endOfSegmentLocation to append
+    const fullText = sections
+      .map((s: any) => `# ${s.heading}\n${s.body}`)
+      .join("\n\n");
+
+    await docs.documents.batchUpdate({
+      documentId: fileId,
+      requestBody: {
+        requests: [
+          {
+            insertText: {
+              endOfSegmentLocation: {},
+              text: fullText + "\n"
+            }
+          }
+        ]
+      }
+    });
+    console.log(`[exportToDocs] Populated doc ${fileId} (${title})`);
+    return { status: "ok", artifact: "doc", fileId, message: "Doc populated" };
   } catch (e) {
-  console.error("[exportToDocs] error", e);
-  return { status: "error", artifact: "doc", message: e instanceof Error ? e.message : String(e) };
+    console.error("[exportToDocs] error", e);
+    return { status: "error", artifact: "doc", message: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -96,42 +108,57 @@ Return ONLY plain text.`;
 
 export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }: ExportPayload & { userId?: string; matrix?: any; folderId?: string }) {
   try {
-  if (!userId) return { status: "skipped", artifact: "sheet", message: "No userId provided" };
+    if (!userId) return { status: "skipped", artifact: "sheet", message: "No userId provided" };
+    const drive = await getDriveClient(userId);
     const sheets = await getSheetsClient(userId);
-  const drive = await getDriveClient(userId);
     const title = `Trade Study Scoring ${tradeStudyId}`;
     const fileMeta: any = await drive.files.create({
-      requestBody: { name: title, mimeType: "application/vnd.google-apps.spreadsheet", parents: (arguments[0] as any).folderId ? [(arguments[0] as any).folderId] : undefined }
+      requestBody: { name: title, mimeType: "application/vnd.google-apps.spreadsheet", parents: folderId ? [folderId] : undefined }
     });
     const fileId = fileMeta.data.id;
-  const criteria: any[] = matrix?.criteria || [];
-  const scored: any[] = matrix?.scored || [];
-  const recommendations: string[] = matrix?.recommendations || [];
-    // Build header row
+    if (!fileId) return { status: "error", artifact: "sheet", message: "Failed to create sheet" };
+
+    const criteria: any[] = matrix?.criteria || [];
+    const scored: any[] = matrix?.scored || [];
+    const recommendations: string[] = matrix?.recommendations || [];
+
+    // Create second sheet via batchUpdate before writing values
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: fileId,
+      requestBody: {
+        requests: [
+          {
+            addSheet: {
+              properties: { title: "Sheet2" }
+            }
+          }
+        ]
+      }
+    }).catch((err: any) => {
+      console.warn("[exportToSheets] addSheet warning", err?.message || err);
+    });
+
+    // Primary scoring matrix (Sheet1)
     const header = ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
     const rows = scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
     await sheets.spreadsheets.values.update({
-      spreadsheetId: fileId!,
+      spreadsheetId: fileId,
       range: "Sheet1!A1",
       valueInputOption: "RAW",
       requestBody: { values: [header, ...rows] }
     });
-    // Sheet2: Criteria Weights & Recommendations
-    const criteriaSheetValues = [
-      ["Criterion", "Weight", "Description"],
-      ...criteria.map((c) => [c.name, c.weight, c.description])
-    ];
-    const recValues = recommendations.length
-      ? [["Recommendations"], ...recommendations.map((r) => [r])]
-      : [["Recommendations"], ["(none)"]];
+
+    // Criteria + recommendations (Sheet2)
+    const criteriaSheetValues = [["Criterion", "Weight", "Description"], ...criteria.map((c) => [c.name, c.weight, c.description])];
+    const recValues = recommendations.length ? [["Recommendations"], ...recommendations.map((r) => [r])] : [["Recommendations"], ["(none)"]];
     await sheets.spreadsheets.values.update({
-      spreadsheetId: fileId!,
+      spreadsheetId: fileId,
       range: "Sheet2!A1",
       valueInputOption: "RAW",
       requestBody: { values: [...criteriaSheetValues, [""], ...recValues] }
     });
-    console.log(`[exportToSheets] Created sheet ${fileId} for study ${tradeStudyId}`);
-    return { status: "ok", artifact: "sheet", fileId, message: "Sheet created" };
+    console.log(`[exportToSheets] Populated sheets ${fileId} (${title})`);
+    return { status: "ok", artifact: "sheet", fileId, message: "Sheets populated" };
   } catch (e) {
     console.error("[exportToSheets] error", e);
     return { status: "error", artifact: "sheet", message: e instanceof Error ? e.message : String(e) };
