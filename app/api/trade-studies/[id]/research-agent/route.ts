@@ -19,7 +19,12 @@ export async function POST(
     }
 
     // Parse request body
-    const body = await req.json();
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
     const { goal, extraContext, researchParams, publishTargets } = body;
 
     if (!goal) {
@@ -62,3 +67,8 @@ export async function POST(
     );
   }
 }
+
+// Force dynamic execution to avoid build-time data collection errors
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+export const runtime = "nodejs";
