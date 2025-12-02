@@ -6,6 +6,7 @@ import GoogleProvider from "next-auth/providers/google";
 import { db } from "./db";
 
 export const authOptions: NextAuthOptions = {
+  debug: process.env.NODE_ENV === "development", // Enable debug logs in development
   adapter: PrismaAdapter(db),
   providers: [
     GoogleProvider({
