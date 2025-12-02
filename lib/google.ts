@@ -4,6 +4,7 @@
 import type { Account } from "@prisma/client";
 import { db } from "./db";
 import { getDriveClient, getDocsClient, getSheetsClient } from "./googleClient";
+import { getTradeStudyById } from "./studies";
 import OpenAI from "openai";
 
 interface ExportPayload {
@@ -12,51 +13,62 @@ interface ExportPayload {
 }
 
 export async function exportToDocs({ tradeStudyId, payload, userId, folderId }: ExportPayload & { userId?: string; folderId?: string }) {
-  if (!payload || !tradeStudyId) return { status: "error", artifact: "doc", message: "Missing payload or tradeStudyId" };
-  if (!payload || typeof payload !== "object") return { status: "error", artifact: "doc", message: "Invalid payload" };
+  if (!tradeStudyId) return { status: "error", artifact: "doc", message: "Missing tradeStudyId" };
   try {
     if (!userId) return { status: "skipped", artifact: "doc", message: "No userId provided" };
-    const drive = await getDriveClient(userId);
+    const study = await getTradeStudyById(tradeStudyId);
     const docs = await getDocsClient(userId);
-    const title = (payload as any).title || (payload as any).topic || `Trade Study ${tradeStudyId}`;
-    // Create doc (empty)
-    const fileMeta: any = await drive.files.create({
-      requestBody: {
-        name: title,
-        mimeType: "application/vnd.google-apps.document",
-        parents: folderId ? [folderId] : undefined
-      }
-    });
-    const fileId = fileMeta.data.id;
-    if (!fileId) return { status: "error", artifact: "doc", message: "Failed to create document" };
+    const title = study?.title || (payload as any)?.topic || `Trade Study ${tradeStudyId}`;
 
-    const sections = (payload as any).criteria ? await buildDocSectionsWithNarrative(payload as any) : [];
-    if (sections.length === 0) {
-      return { status: "ok", artifact: "doc", fileId, message: "Doc created (no sections)" };
+    // Create document using Docs API (preferred over Drive create for immediate write readiness)
+    const created = await docs.documents.create({ requestBody: { title } });
+    const documentId = created.data.documentId;
+    if (!documentId) return { status: "error", artifact: "doc", message: "Failed to create document" };
+
+    if (folderId) {
+      // Move file to folder if provided
+      const drive = await getDriveClient(userId);
+      await drive.files.update({ fileId: documentId, addParents: folderId, fields: "id, parents" }).catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn("[exportToDocs] folder move warning", msg);
+      });
     }
 
-    // Build a single insert request using endOfSegmentLocation to append
-    const fullText = sections
-      .map((s: any) => `# ${s.heading}\n${s.body}`)
-      .join("\n\n");
+    const data = (payload as any) || study?.data || {};
+    const sections = data.criteria ? await buildDocSectionsWithNarrative({ ...data, topic: title }) : [];
+    if (sections.length === 0) return { status: "ok", artifact: "doc", fileId: documentId, message: "Doc created (no content)" };
 
-    await docs.documents.batchUpdate({
-      documentId: fileId,
-      requestBody: {
-        requests: [
-          {
-            insertText: {
-              endOfSegmentLocation: {},
-              text: fullText + "\n"
-            }
-          }
-        ]
-      }
+    const requests = sections.flatMap((s: any, idx: number) => {
+      return [
+        {
+          insertText: { endOfSegmentLocation: {}, text: (idx === 0 ? "" : "\n\n") + s.heading + "\n" + s.body }
+        }
+      ];
     });
-    console.log(`[exportToDocs] Populated doc ${fileId} (${title})`);
-    return { status: "ok", artifact: "doc", fileId, message: "Doc populated" };
+
+    // Simple retry wrapper
+    const attemptBatch = async () => {
+      return await docs.documents.batchUpdate({ documentId, requestBody: { requests } });
+    };
+    let lastErr: any;
+    for (let i = 0; i < 3; i++) {
+      try {
+    const resp = await attemptBatch();
+    console.log(`[exportToDocs] batchUpdate success id=${resp.data.documentId}`);
+        return { status: "ok", artifact: "doc", fileId: documentId, message: "Doc populated" };
+      } catch (e) {
+    lastErr = e;
+        const backoff = 300 * (i + 1);
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[exportToDocs] batchUpdate attempt ${i + 1} failed; retrying in ${backoff}ms: ${msg}`);
+        await new Promise(r => setTimeout(r, backoff));
+      }
+    }
+  const finalMsg = lastErr instanceof Error ? lastErr.message : String(lastErr);
+  console.error("[exportToDocs] failed after retries", finalMsg);
+    return { status: "error", artifact: "doc", fileId: documentId, message: lastErr instanceof Error ? lastErr.message : String(lastErr) };
   } catch (e) {
-    console.error("[exportToDocs] error", e);
+    console.error("[exportToDocs] fatal", e);
     return { status: "error", artifact: "doc", message: e instanceof Error ? e.message : String(e) };
   }
 }
@@ -109,58 +121,59 @@ Return ONLY plain text.`;
 export async function exportToSheets({ tradeStudyId, userId, matrix, folderId }: ExportPayload & { userId?: string; matrix?: any; folderId?: string }) {
   try {
     if (!userId) return { status: "skipped", artifact: "sheet", message: "No userId provided" };
-    const drive = await getDriveClient(userId);
+  const study = await getTradeStudyById(String(tradeStudyId));
     const sheets = await getSheetsClient(userId);
-    const title = `Trade Study Scoring ${tradeStudyId}`;
-    const fileMeta: any = await drive.files.create({
-      requestBody: { name: title, mimeType: "application/vnd.google-apps.spreadsheet", parents: folderId ? [folderId] : undefined }
-    });
-    const fileId = fileMeta.data.id;
-    if (!fileId) return { status: "error", artifact: "sheet", message: "Failed to create sheet" };
-
+    const title = study?.title || `Trade Study Scoring ${tradeStudyId}`;
     const criteria: any[] = matrix?.criteria || [];
     const scored: any[] = matrix?.scored || [];
     const recommendations: string[] = matrix?.recommendations || [];
 
-    // Create second sheet via batchUpdate before writing values
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: fileId,
+    const scoringHeader = ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
+    const scoringRows = scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
+    const sheet1Values = [scoringHeader, ...scoringRows];
+    const sheet2Values = [["Criterion", "Weight", "Description"], ...criteria.map((c) => [c.name, c.weight, c.description]), [""], ["Recommendations"], ...recommendations.map(r => [r || ""])];
+
+    const created = await sheets.spreadsheets.create({
       requestBody: {
-        requests: [
+        properties: { title },
+        sheets: [
           {
-            addSheet: {
-              properties: { title: "Sheet2" }
-            }
+            properties: { title: "Scoring" },
+            data: [
+              {
+                startRow: 0,
+                startColumn: 0,
+                rowData: sheet1Values.map(row => ({ values: row.map(v => ({ userEnteredValue: { stringValue: String(v) } })) }))
+              }
+            ]
+          },
+          {
+            properties: { title: "Criteria" },
+            data: [
+              {
+                startRow: 0,
+                startColumn: 0,
+                rowData: sheet2Values.map(row => ({ values: row.map(v => ({ userEnteredValue: { stringValue: String(v) } })) }))
+              }
+            ]
           }
         ]
       }
-    }).catch((err: any) => {
-      console.warn("[exportToSheets] addSheet warning", err?.message || err);
     });
+    const spreadsheetId = created.data.spreadsheetId;
+    if (!spreadsheetId) return { status: "error", artifact: "sheet", message: "Failed to create spreadsheet" };
 
-    // Primary scoring matrix (Sheet1)
-    const header = ["Alternative", ...criteria.map((c) => c.name), "Weighted Total"];
-    const rows = scored.map((s) => [s.name, ...criteria.map((c) => s.scores[c.name] ?? 0), s.weightedTotal]);
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: fileId,
-      range: "Sheet1!A1",
-      valueInputOption: "RAW",
-      requestBody: { values: [header, ...rows] }
-    });
-
-    // Criteria + recommendations (Sheet2)
-    const criteriaSheetValues = [["Criterion", "Weight", "Description"], ...criteria.map((c) => [c.name, c.weight, c.description])];
-    const recValues = recommendations.length ? [["Recommendations"], ...recommendations.map((r) => [r])] : [["Recommendations"], ["(none)"]];
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: fileId,
-      range: "Sheet2!A1",
-      valueInputOption: "RAW",
-      requestBody: { values: [...criteriaSheetValues, [""], ...recValues] }
-    });
-    console.log(`[exportToSheets] Populated sheets ${fileId} (${title})`);
-    return { status: "ok", artifact: "sheet", fileId, message: "Sheets populated" };
+    if (folderId) {
+      const drive = await getDriveClient(userId);
+      await drive.files.update({ fileId: spreadsheetId, addParents: folderId, fields: "id, parents" }).catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn("[exportToSheets] folder move warning", msg);
+      });
+    }
+    console.log(`[exportToSheets] Created & populated spreadsheet ${spreadsheetId} (${title})`);
+    return { status: "ok", artifact: "sheet", fileId: spreadsheetId, message: "Spreadsheet populated" };
   } catch (e) {
-    console.error("[exportToSheets] error", e);
+    console.error("[exportToSheets] fatal", e);
     return { status: "error", artifact: "sheet", message: e instanceof Error ? e.message : String(e) };
   }
 }
